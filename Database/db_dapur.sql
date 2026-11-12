@@ -43,7 +43,7 @@ INSERT INTO `ingredients` (`id_ingredient`, `nama_bahan`, `kategori_bahan`) VALU
 (3, 'Bawang Merah', 'Bumbu'),
 (4, 'Bawang Putih', 'Bumbu'),
 (5, 'Daun Bawang', 'Sayuran'),
-(6, 'Miyak Goreng', 'Minyak/Lemak'),
+(6, 'Minyak Goreng', 'Minyak/Lemak'),
 (7, 'Margarin', 'Minyak/Lemak'),
 (8, 'Garam', 'Bumbu'),
 (9, 'Penyedap Rasa', 'Bumbu'),
