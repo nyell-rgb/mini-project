@@ -1,1390 +1,940 @@
+"""Resep DapurKu - aplikasi resep makanan sederhana (Tkinter).
+
+Judul jendela, tombol minimize, maximize, dan close memakai bar bawaan Windows.
+Ikon dibaca dari folder assets/icons (format PNG, ukuran sekitar 24x24 piksel).
+"""
+
+import os
+import shutil
 import sys
-from pathlib import Path
-from collections.abc import Callable
-import math
 import tkinter as tk
+import uuid
+from tkinter import filedialog
 from tkinter import font as tkfont
 from tkinter import messagebox
 from tkinter import ttk
 
+# Pillow dipakai untuk membaca JPG dan memotong/mengecilkan foto.
+# Pasang dengan: pip install pillow
+try:
+    from PIL import Image, ImageOps, ImageTk
 
-class RecipeKeeperApp:
-    ACCENT = "#D14300"
-    SIDEBAR = "#F3F3F3"
-    WINDOW_BG = "#FAFAFA"
-    SEARCH_BG = "#F9F9F9"
-    TEXT = "#1A1A1A"
-    MUTED = "#6E6E6E"
-    PLACEHOLDER_FG = "#5F5F5F"
-    PLACEHOLDER_TEXT = "Search recipes"
-    FONT = "Inter"
+    PIL_ADA = True
+except ImportError:
+    PIL_ADA = False
 
-    def __init__(self, root: tk.Tk) -> None:
+# Agar tampilan tidak buram di Windows (layar dengan scaling 125% / 150%).
+# Harus dijalankan sebelum tk.Tk() dibuat.
+if sys.platform == "win32":
+    import ctypes
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- pengaturan
+JUDUL_APP = "Resep DapurKu"
+PLACEHOLDER = "Cari resep"
+
+ORANYE = "#D14300"
+ORANYE_HOVER = "#B93600"
+SIDEBAR = "#F3F3F3"
+LATAR = "#FAFAFA"
+PUTIH = "#FFFFFF"
+TEKS = "#1A1A1A"
+REDUP = "#6E6E6E"
+GARIS = "#D0D0D0"
+FOKUS = "#1A6FD0"
+MERAH = "#C42B1C"
+
+# Warna kartu untuk resep baru (dipakai bergantian)
+WARNA_KARTU = ["#E2AE58", "#5E3B70", "#C94A2E", "#B8793A", "#D9A441"]
+
+# Folder ikon: assets/icons/<nama>.png
+FOLDER_IKON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons")
+
+# Folder tempat foto resep disalin (otomatis dibuat): foto/<nama_file>
+FOLDER_FOTO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "foto")
+
+# Nama file ikon di assets/icons (tanpa .png). Kalau file-nya tidak ada, ikon dibiarkan kosong.
+NAMA_IKON = (
+    "menu", "search", "plus", "home", "back",
+    "save", "cancel", "edit", "trash", "star", "photo",
+    "badge_28", "badge_32",  # lingkaran oranye untuk nomor langkah
+)
+
+# Ukuran foto di halaman detail (persegi, tetap walau jendela diubah)
+UKURAN_FOTO_DETAIL = 398
+
+
+class AplikasiResep:
+    def __init__(self, root):
         self.root = root
-        self.scale = self._screen_scale()
-        self.FONT = self._pick_font()
-        self.icons: dict[str, tk.PhotoImage] = {}
-        self.recipes = [
-            {
-                "name": "Pancakes",
-                "color": "#E2AE58",
-                "ingredients": [
-                    ("3 cups/375g", "all-purpose flour"),
-                    ("3 teaspoons", "baking powder"),
-                    ("1 tablespoon", "caster sugar"),
-                    ("1 1/2 cups/375ml", "milk"),
-                    ("3", "eggs"),
-                    ("1/2 teaspoon", "salt"),
-                ],
-                "directions": [
-                    "Sift the flour, baking powder, salt and caster sugar into a bowl.",
-                    "Break the eggs into a separate bowl and whisk together with the milk.",
-                    "Gradually add the milk and egg mixture to the flour mixture and whisk to a smooth batter.",
-                    "Heat a frying pan over a medium heat and melt a small knob of butter. Pour the batter into the pan, using approximately 1/4 cup for each pancake.",
-                    "When the top of the pancake begins to bubble, turn and cook the other side until golden brown.",
-                    "Serve with butter and maple syrup.",
-                ],
-                "favorite": False,
-            },
-            {"name": "Cheesecake", "color": "#5E3B70", "ingredients": [], "directions": [], "favorite": False},
-            {"name": "Spaghetti", "color": "#C94A2E", "ingredients": [], "directions": [], "favorite": False},
-            {"name": "Cookies", "color": "#B8793A", "ingredients": [], "directions": [], "favorite": False},
-            {"name": "Nasi Goreng", "color": "#D9A441", "ingredients": [], "directions": [], "favorite": False},
-        ]
-        self.recipe_colors = [str(recipe["color"]) for recipe in self.recipes]
-        # Match the Figma heading even though its current grid shows five cards.
-        self.recipe_count = 6
-        self.active_tab = "Resep"
-        self.current_view = "home"
-        self.current_recipe: dict[str, object] | None = None
-        self.editing_recipe: dict[str, object] | None = None
-        self.search_placeholder = True
-        self.is_maximized = False
-        self.previous_geometry = ""
-        self._drag_offset_x: int | None = None
-        self._drag_offset_y: int | None = None
-        self._load_icons()
-        self._configure_window()
-        self._build_window()
-        self.root.after(50, self._enable_taskbar_icon)
+        self.font_nama = self.pilih_font()
+        self.ikon = {}
+        self.muat_semua_ikon()
 
-    # ------------------------------------------------------------------ utils
-    def _enable_taskbar_icon(self) -> None:
-        """Windows: window tanpa frame (overrideredirect) tidak muncul di taskbar.
-        Beri gaya WS_EX_APPWINDOW lalu map ulang window agar ikon taskbar muncul."""
-        if sys.platform != "win32":
-            return
-        import ctypes
+        self.resep = self.muat_resep()
+        self.tab_aktif = "Resep"        # "Resep" atau "Favorit"
+        self.resep_dipilih = None       # resep yang sedang dilihat
+        self.resep_diedit = None        # resep yang sedang diedit (None = resep baru)
+        self.placeholder_aktif = True   # True kalau kotak cari masih berisi "Cari resep"
+        self.kolom_kartu = 5
+        self.baris_bahan = []           # baris input bahan di form
+        self.cache_foto = {}            # foto yang sudah dimuat (supaya tidak dibaca ulang)
+        self.foto_form = None           # path foto yang sedang dipilih di form
+        self.foto_form_baru = False     # True kalau foto baru dipilih dan belum disalin
+        self.area_scroll = {}           # daftar area yang bisa di-scroll
 
-        GWL_EXSTYLE = -20
-        WS_EX_APPWINDOW = 0x00040000
-        WS_EX_TOOLWINDOW = 0x00000080
-        user32 = ctypes.windll.user32
-        hwnd = user32.GetParent(self.root.winfo_id())
-        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
-        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
-        self.root.withdraw()
-        self.root.after(10, self.root.deiconify)
+        self.atur_jendela()
+        self.halaman = tk.Frame(root, bg=LATAR)
+        self.halaman.pack(fill="both", expand=True)
+        root.bind_all("<MouseWheel>", self.saat_mouse_wheel)
+        self.tampil_beranda()
 
-    def _px(self, value: int) -> int:
-        return max(1, round(value * self.scale))
+    # ------------------------------------------------------------ persiapan
+    def muat_resep(self):
+        """Daftar resep awal. Sengaja kosong: data nanti diambil dari MySQL.
 
-    def _font(self, size: int) -> tuple[str, int]:
-        return (self.FONT, -self._px(size))
+        Bentuk tiap resep:
+        {"name": str, "color": str, "favorite": bool,
+         "photo": nama file di folder foto/ ("" kalau tidak ada),
+         "ingredients": [(takaran, bahan), ...], "directions": [langkah, ...]}
+        """
+        return []
 
-    def _screen_scale(self) -> float:
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        return min(1.0, (screen_width - 40) / 1317, (screen_height - 60) / 867)
-
-    def _pick_font(self) -> str:
-        """Pakai Inter jika terpasang, kalau tidak jatuh ke font yang tersedia."""
-        available = set(tkfont.families(self.root))
-        for name in (self.FONT, "Segoe UI", "Helvetica", "Arial", "DejaVu Sans"):
-            if name in available:
-                return name
+    def pilih_font(self):
+        tersedia = set(tkfont.families())
+        for nama in ("Inter", "Segoe UI", "Helvetica", "Arial", "DejaVu Sans"):
+            if nama in tersedia:
+                return nama
         return "TkDefaultFont"
 
-    def _load_icons(self) -> None:
-        icon_dir = Path(__file__).resolve().parent / "assets" / "icons"
-        for name in ("minimize", "maximize", "close", "menu", "search", "plus", "home"):
+    def font(self, ukuran, tebal=False):
+        # Ukuran negatif = piksel
+        if tebal:
+            return (self.font_nama, -ukuran, "bold")
+        return (self.font_nama, -ukuran)
+
+    def muat_semua_ikon(self):
+        for nama in NAMA_IKON:
             try:
-                self.icons[name] = tk.PhotoImage(
-                    master=self.root,
-                    file=str(icon_dir / f"{name}.png"),
-                )
+                path = os.path.join(FOLDER_IKON, nama + ".png")
+                self.ikon[nama] = tk.PhotoImage(master=self.root, file=path)
             except tk.TclError:
-                # File ikon tidak ada / rusak: pakai gambar kosong agar app tetap jalan.
-                self.icons[name] = tk.PhotoImage(master=self.root, width=24, height=24)
+                pass  # file belum ada -> ikon kosong
 
-    def _configure_window(self) -> None:
-        width = self._px(1317)
-        height = self._px(867)
-        x = max(0, (self.root.winfo_screenwidth() - width) // 2)
-        y = max(0, (self.root.winfo_screenheight() - height) // 2)
-        self.root.title("Recipe Keeper")
-        self.root.overrideredirect(True)
-        self.root.configure(bg=self.WINDOW_BG)
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
-        self.root.minsize(self._px(760), self._px(520))
+    def atur_jendela(self):
+        lebar = min(1317, self.root.winfo_screenwidth() - 40)
+        tinggi = min(867, self.root.winfo_screenheight() - 100)
+        x = (self.root.winfo_screenwidth() - lebar) // 2
+        y = max(0, (self.root.winfo_screenheight() - tinggi) // 2 - 20)
+        self.root.title(JUDUL_APP)
+        self.root.geometry(f"{lebar}x{tinggi}+{x}+{y}")
+        self.root.minsize(760, 520)
+        self.root.configure(bg=LATAR)
 
-    # ----------------------------------------------------------------- layout
-    def _build_window(self) -> None:
-        self._build_titlebar()
+    def bersihkan_halaman(self):
+        for widget in self.halaman.winfo_children():
+            widget.destroy()
+        self.area_scroll = {}
+        self.root.unbind("<Escape>")
 
-        self.content = tk.Frame(self.root, bg=self.WINDOW_BG)
-        self.content.pack(fill="both", expand=True)
-        self._show_home_view()
+    # ------------------------------------------------------ komponen umum
+    def buat_ikon(self, induk, nama, latar):
+        """Label berisi ikon PNG. Kalau file PNG-nya tidak ada, hasilnya kosong."""
+        return tk.Label(induk, image=self.ikon.get(nama), bg=latar)
 
-    def _build_titlebar(self) -> None:
-        bar = tk.Frame(self.root, bg=self.ACCENT, height=self._px(41))
-        bar.pack(fill="x")
-        bar.pack_propagate(False)
-        bar.bind("<Button-1>", self._start_window_move)
-        bar.bind("<B1-Motion>", self._move_window)
-        bar.bind("<Double-Button-1>", lambda _e: self._toggle_maximize())
-
-        self.back_button = tk.Canvas(
-            bar,
-            width=self._px(58),
-            height=self._px(41),
-            bg=self.ACCENT,
-            highlightthickness=0,
-            cursor="hand2",
-        )
-        self._draw_icon(self.back_button, "back", self._px(29), self._px(20), "#FFFFFF")
-        self.back_button.bind("<Button-1>", lambda _e: self._navigate_back())
-        self.back_button.bind("<Enter>", lambda _e: self.back_button.configure(bg="#C13D00"))
-        self.back_button.bind("<Leave>", lambda _e: self.back_button.configure(bg=self.ACCENT))
-        self.back_button.pack_forget()
-
-        self.title_label = tk.Label(
-            bar,
-            text="Recipe Keeper",
-            bg=self.ACCENT,
-            fg="#FFFFFF",
-            font=self._font(15),
-            anchor="w",
-        )
-        self.title_label.pack(side="left", fill="y", padx=self._px(16))
-        self.title_label.bind("<Button-1>", self._start_window_move)
-        self.title_label.bind("<B1-Motion>", self._move_window)
-        self.title_label.bind("<Double-Button-1>", lambda _e: self._toggle_maximize())
-
-        controls = tk.Frame(bar, bg=self.ACCENT)
-        controls.pack(side="right", fill="y")
-        self._window_control(controls, "minimize", self._minimize)
-        self._window_control(controls, "maximize", self._toggle_maximize)
-        self._window_control(controls, "close", self.root.destroy)
-
-    def _set_titlebar_back(self, visible: bool) -> None:
-        if visible:
-            self.back_button.pack(side="left", before=self.title_label)
-            self.title_label.pack_configure(padx=0)
-        else:
-            self.back_button.pack_forget()
-            self.title_label.pack_configure(padx=self._px(16))
-
-    def _draw_icon(
-        self,
-        canvas: tk.Canvas,
-        icon: str,
-        center_x: int,
-        center_y: int,
-        color: str,
-    ) -> None:
-        unit = self._px(1)
-        options = {"fill": color, "width": max(1, self._px(2)), "capstyle": tk.ROUND}
-        if icon == "back":
-            canvas.create_line(
-                center_x + self._px(5), center_y,
-                center_x - self._px(5), center_y,
-                center_x, center_y - self._px(5),
-                fill=color, width=max(1, self._px(2)), capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
-            canvas.create_line(
-                center_x - self._px(5), center_y,
-                center_x, center_y + self._px(5),
-                fill=color, width=max(1, self._px(2)), capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
-        elif icon == "cancel":
-            canvas.create_line(
-                center_x - self._px(5), center_y - self._px(5),
-                center_x + self._px(5), center_y + self._px(5),
-                **options,
-            )
-            canvas.create_line(
-                center_x + self._px(5), center_y - self._px(5),
-                center_x - self._px(5), center_y + self._px(5),
-                **options,
-            )
-        elif icon == "save":
-            left, top = center_x - self._px(6), center_y - self._px(7)
-            right, bottom = center_x + self._px(6), center_y + self._px(7)
-            canvas.create_rectangle(left, top, right, bottom, outline=color, width=unit)
-            canvas.create_rectangle(
-                center_x - self._px(3), top,
-                center_x + self._px(3), center_y - self._px(2),
-                outline=color, width=unit,
-            )
-            canvas.create_rectangle(
-                center_x - self._px(4), center_y + self._px(2),
-                center_x + self._px(4), bottom,
-                outline=color, width=unit,
-            )
-        elif icon == "edit":
-            canvas.create_line(
-                center_x - self._px(5), center_y + self._px(5),
-                center_x + self._px(4), center_y - self._px(4),
-                **options,
-            )
-            canvas.create_line(
-                center_x - self._px(6), center_y + self._px(7),
-                center_x - self._px(2), center_y + self._px(6),
-                **options,
-            )
-        elif icon == "trash":
-            canvas.create_rectangle(
-                center_x - self._px(5), center_y - self._px(4),
-                center_x + self._px(5), center_y + self._px(7),
-                outline=color, width=unit,
-            )
-            canvas.create_line(
-                center_x - self._px(7), center_y - self._px(6),
-                center_x + self._px(7), center_y - self._px(6),
-                **options,
-            )
-            canvas.create_line(
-                center_x - self._px(2), center_y - self._px(8),
-                center_x + self._px(2), center_y - self._px(8),
-                **options,
-            )
-        elif icon == "star":
-            points: list[int] = []
-            for index in range(10):
-                angle = -90 + index * 36
-                radius = self._px(8 if index % 2 == 0 else 3.5)
-                points.extend(
-                    (
-                        round(center_x + radius * math.cos(math.radians(angle))),
-                        round(center_y + radius * math.sin(math.radians(angle))),
-                    )
-                )
-            canvas.create_polygon(points, fill="", outline=color, width=unit)
-
-    def _header_action(
-        self,
-        parent: tk.Frame,
-        text: str,
-        icon: str,
-        width: int,
-        primary: bool,
-        command: Callable[[], None],
-        foreground: str | None = None,
-    ) -> tk.Canvas:
-        background = self.ACCENT if primary else "#FFFFFF"
-        foreground = foreground or ("#FFFFFF" if primary else self.TEXT)
-        canvas = tk.Canvas(
-            parent,
-            width=self._px(width),
-            height=self._px(40),
-            bg=background,
-            highlightthickness=0,
-            cursor="hand2",
-        )
-        if not primary:
-            canvas.create_rectangle(
-                0, 0, self._px(width) - 1, self._px(40) - 1,
-                outline="#D0D0D0", width=self._px(1),
-            )
-        self._draw_icon(canvas, icon, self._px(26 if primary else 21), self._px(20), foreground)
-        canvas.create_text(
-            self._px(48 if primary else 41),
-            self._px(20),
-            text=text,
-            anchor="w",
-            fill=foreground,
-            font=self._font(17),
-            tags=("action_label",),
-        )
-        hover = "#B93600" if primary else "#F5F5F5"
-        canvas.bind("<Button-1>", lambda _event: command())
-        canvas.bind("<Enter>", lambda _event: canvas.configure(bg=hover))
-        canvas.bind("<Leave>", lambda _event: canvas.configure(bg=background))
-        return canvas
-
-    def _step_heading(self, parent: tk.Frame, number: int, title: str) -> tk.Frame:
-        heading = tk.Frame(parent, bg="#FFFFFF", height=self._px(51))
-        heading.grid(row=0, column=0, sticky="ew")
-        heading.grid_propagate(False)
-        badge = tk.Canvas(
-            heading,
-            width=self._px(28),
-            height=self._px(28),
-            bg="#FFFFFF",
-            highlightthickness=0,
-        )
-        badge.create_oval(
-            0, 0, self._px(28), self._px(28),
-            fill=self.ACCENT, outline=self.ACCENT,
-        )
-        badge.create_text(
-            self._px(14), self._px(14), text=str(number),
-            fill="#FFFFFF", font=(self.FONT, -self._px(15), "bold"),
-        )
-        badge.place(x=self._px(19), y=self._px(15))
-        tk.Label(
-            heading,
-            text=title,
-            bg="#FFFFFF",
-            fg=self.TEXT,
-            font=self._font(19),
-            anchor="w",
-        ).place(x=self._px(59), y=self._px(12), height=self._px(32))
-        return heading
-
-    def _bordered_panel(
-        self,
-        parent: tk.Frame,
-        row: int,
-        column: int,
-        columnspan: int = 1,
-        rowspan: int = 1,
-        padx: tuple[int, int] = (0, 0),
-        height: int | None = None,
-    ) -> tk.Frame:
-        panel = tk.Frame(parent, bg="#D0D0D0", highlightthickness=0)
-        panel.grid(
-            row=row,
-            column=column,
-            columnspan=columnspan,
-            rowspan=rowspan,
-            sticky="nsew",
-            padx=padx,
-        )
-        panel.grid_propagate(False)
-        if height is not None:
-            panel.configure(height=self._px(height))
-        surface = tk.Frame(panel, bg="#FFFFFF")
-        surface.place(
-            x=self._px(1),
-            y=self._px(1),
-            relwidth=1,
-            width=-self._px(2),
-            relheight=1,
-            height=-self._px(2),
-        )
-        return surface
-
-    def _window_control(
-        self,
-        parent: tk.Frame,
-        icon_name: str,
-        command: Callable[[], None],
-    ) -> None:
-        control = tk.Frame(
-            parent,
-            bg=self.ACCENT,
-            width=self._px(58),
-            height=self._px(41),
-            cursor="hand2",
-        )
-        control.pack(side="left")
-        control.pack_propagate(False)
-        icon = tk.Label(control, image=self.icons[icon_name], bg=self.ACCENT)
-        icon.place(relx=0.5, rely=0.5, anchor="center")
-
-        hover = "#B93600" if icon_name == "close" else "#C13D00"
-
-        def set_bg(color: str) -> None:
-            # Ubah frame DAN ikon bersama-sama supaya tidak berkedip saat kursor
-            # pindah dari frame ke label di dalamnya.
-            control.configure(bg=color)
-            icon.configure(bg=color)
-
-        for widget in (control, icon):
-            widget.bind("<Button-1>", lambda _event: command())
-            widget.bind("<Enter>", lambda _event: set_bg(hover))
-            widget.bind("<Leave>", lambda _event: set_bg(self.ACCENT))
-
-    def _build_sidebar(self, parent: tk.Frame) -> None:
-        sidebar = tk.Frame(parent, bg=self.SIDEBAR, width=self._px(321))
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
-        sidebar.grid_columnconfigure(0, weight=1)
-
-        menu_row = tk.Frame(sidebar, bg=self.SIDEBAR, height=self._px(58))
-        menu_row.grid(row=0, column=0, sticky="ew")
-        menu_row.grid_propagate(False)
-        menu_button = tk.Label(
-            menu_row,
-            image=self.icons["menu"],
-            bg=self.SIDEBAR,
-            cursor="hand2",
-        )
-        menu_button.place(
-            x=self._px(18),
-            y=self._px(16),
-            width=self._px(28),
-            height=self._px(28),
-        )
-
-        search_wrap = tk.Frame(
-            sidebar,
-            bg="#8A8A8A",
-            width=self._px(289),
-            height=self._px(40),
-        )
-        search_wrap.grid(
-            row=1,
-            column=0,
-            sticky="w",
-            padx=(self._px(17), self._px(15)),
-            pady=(self._px(12), self._px(18)),
-        )
-        search_wrap.grid_propagate(False)
-        search_inner = tk.Frame(search_wrap, bg=self.SEARCH_BG)
-        search_inner.place(
-            x=1,
-            y=1,
-            width=max(1, self._px(289) - 2),
-            height=max(1, self._px(40) - 2),
-        )
-        search_inner.grid_rowconfigure(0, weight=1)
-        search_inner.grid_columnconfigure(0, weight=1)
-
-        self.search_var = tk.StringVar(value=self.PLACEHOLDER_TEXT)
-        self.search_entry = tk.Entry(
-            search_inner,
-            textvariable=self.search_var,
-            bg=self.SEARCH_BG,
-            fg=self.PLACEHOLDER_FG,
-            insertbackground=self.TEXT,
+    def buat_tombol(self, induk, teks, ikon, perintah, utama=False, warna_teks=None):
+        latar = ORANYE if utama else PUTIH
+        hover = ORANYE_HOVER if utama else "#F5F5F5"
+        warna = warna_teks or (PUTIH if utama else TEKS)
+        gambar = self.ikon.get(ikon)
+        tulisan = " " + teks if gambar else teks
+        tombol = tk.Button(
+            induk,
+            text=tulisan,
+            image=gambar,
+            compound="left",
+            command=perintah,
+            bg=latar,
+            fg=warna,
+            activebackground=hover,
+            activeforeground=warna,
+            font=self.font(17),
             relief="flat",
-            borderwidth=0,
+            bd=0,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            highlightthickness=0 if utama else 1,
+            highlightbackground=GARIS,
+            highlightcolor=GARIS,
+        )
+        tombol.bind("<Enter>", lambda e: tombol.config(bg=hover))
+        tombol.bind("<Leave>", lambda e: tombol.config(bg=latar))
+        return tombol
+
+    def buat_kepala(self, judul, perintah_kembali):
+        """Bar judul halaman (di bawah bar Windows) dengan tombol kembali."""
+        kepala = tk.Frame(self.halaman, bg=SIDEBAR, height=70)
+        kepala.pack(fill="x")
+        kepala.pack_propagate(False)
+        gambar = self.ikon.get("back")
+        kembali = tk.Button(
+            kepala,
+            image=gambar,
+            command=perintah_kembali,
+            bg=SIDEBAR,
+            fg=TEKS,
+            activebackground="#E6E6E6",
+            font=self.font(24),
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=6,
+            cursor="hand2",
+        )
+        kembali.pack(side="left", padx=(18, 0))
+        tk.Label(kepala, text=judul, bg=SIDEBAR, fg=TEKS, font=self.font(30)).pack(
+            side="left", padx=(8, 0)
+        )
+        return kepala
+
+    def buat_panel(self, induk):
+        return tk.Frame(
+            induk, bg=PUTIH, highlightbackground=GARIS, highlightcolor=GARIS, highlightthickness=1
+        )
+
+    def buat_lingkaran(self, induk, nomor, ukuran, ukuran_font):
+        """Lingkaran bernomor: gambar PNG badge_<ukuran>.png dengan angka tepat di tengahnya."""
+        return tk.Label(
+            induk,
+            image=self.ikon.get(f"badge_{ukuran}"),
+            text=str(nomor),
+            compound="center",
+            fg=PUTIH,
+            bg=PUTIH,
+            bd=0,
+            font=self.font(ukuran_font, True),
+        )
+
+    def buat_entry(self, induk, variabel, lebar=20):
+        return tk.Entry(
+            induk,
+            textvariable=variabel,
+            width=lebar,
+            bg=LATAR,
+            fg=TEKS,
+            insertbackground=TEKS,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=GARIS,
+            highlightcolor=FOKUS,
+            font=self.font(16),
+        )
+
+    def buat_area_scroll(self, induk, latar, dengan_scrollbar=False):
+        """Area yang bisa di-scroll. Mengembalikan (wadah, canvas, isi)."""
+        wadah = tk.Frame(induk, bg=latar)
+        wadah.grid_rowconfigure(0, weight=1)
+        wadah.grid_columnconfigure(0, weight=1)
+        kanvas = tk.Canvas(
+            wadah, width=1, height=1, bg=latar, highlightthickness=0, yscrollincrement=30
+        )
+        kanvas.grid(row=0, column=0, sticky="nsew")
+        isi = tk.Frame(kanvas, bg=latar)
+        jendela = kanvas.create_window((0, 0), window=isi, anchor="nw")
+
+        scrollbar = None
+        if dengan_scrollbar:
+            scrollbar = ttk.Scrollbar(wadah, orient="vertical", command=kanvas.yview)
+            kanvas.configure(yscrollcommand=scrollbar.set)
+
+        def perbarui(_event=None):
+            tinggi_isi = isi.winfo_reqheight()
+            kanvas.configure(scrollregion=(0, 0, kanvas.winfo_width(), tinggi_isi))
+            bisa_scroll = tinggi_isi > kanvas.winfo_height() > 1
+            if not bisa_scroll:
+                kanvas.yview_moveto(0)
+            if scrollbar is not None:
+                if bisa_scroll:
+                    scrollbar.grid(row=0, column=1, sticky="ns")
+                else:
+                    scrollbar.grid_remove()
+
+        def saat_kanvas_berubah(event):
+            kanvas.itemconfigure(jendela, width=event.width)
+            perbarui()
+
+        kanvas.bind("<Configure>", saat_kanvas_berubah)
+        isi.bind("<Configure>", perbarui)
+        self.area_scroll[wadah] = kanvas
+        return wadah, kanvas, isi
+
+    def saat_mouse_wheel(self, event):
+        """Scroll area yang sedang ditunjuk kursor."""
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+        except (KeyError, tk.TclError):
+            return
+        while widget is not None:
+            if widget in self.area_scroll:
+                kanvas = self.area_scroll[widget]
+                if kanvas.winfo_exists() and kanvas.bbox("all"):
+                    tinggi_isi = kanvas.bbox("all")[3]
+                    if tinggi_isi > kanvas.winfo_height():
+                        kanvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return
+            widget = widget.master
+
+    def path_foto(self, nama_file):
+        """Path lengkap foto di folder foto/, atau None kalau resep tidak punya foto."""
+        if not nama_file:
+            return None
+        return os.path.join(FOLDER_FOTO, os.path.basename(nama_file))
+
+    def muat_foto(self, path, lebar, tinggi, simpan_cache=True):
+        """Muat foto, potong dari tengah agar pas lebar x tinggi. None kalau gagal."""
+        if not PIL_ADA or not path or lebar < 2 or tinggi < 2 or not os.path.isfile(path):
+            return None
+        kunci = (path, lebar, tinggi)
+        if kunci in self.cache_foto:
+            return self.cache_foto[kunci]
+        try:
+            gambar = Image.open(path)
+            gambar = ImageOps.exif_transpose(gambar).convert("RGB")
+            gambar = ImageOps.fit(gambar, (lebar, tinggi), Image.LANCZOS)
+            hasil = ImageTk.PhotoImage(gambar)
+        except Exception:
+            return None
+        if simpan_cache:
+            self.cache_foto[kunci] = hasil
+        return hasil
+
+    def daftar_bahan(self, nilai):
+        """Ubah data bahan jadi daftar (takaran, bahan)."""
+        hasil = []
+        if isinstance(nilai, str):
+            for baris in nilai.splitlines():
+                baris = baris.strip()
+                if not baris:
+                    continue
+                if " | " in baris:
+                    takaran, bahan = baris.split(" | ", 1)
+                    hasil.append((takaran.strip(), bahan.strip()))
+                else:
+                    hasil.append(("", baris))
+        elif isinstance(nilai, (list, tuple)):
+            for item in nilai:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    hasil.append((str(item[0]), str(item[1])))
+                else:
+                    hasil.append(("", str(item)))
+        return hasil
+
+    def daftar_langkah(self, nilai):
+        """Ubah data langkah jadi daftar teks (satu langkah per baris)."""
+        if isinstance(nilai, str):
+            nilai = nilai.splitlines()
+        return [str(langkah).strip() for langkah in nilai if str(langkah).strip()]
+
+    # ------------------------------------------------------------ BERANDA
+    def tampil_beranda(self):
+        self.bersihkan_halaman()
+        self.resep_dipilih = None
+        self.resep_diedit = None
+
+        badan = tk.Frame(self.halaman, bg=LATAR)
+        badan.pack(fill="both", expand=True)
+        badan.grid_rowconfigure(0, weight=1)
+        badan.grid_columnconfigure(1, weight=1)
+        self.buat_sidebar(badan)
+        self.buat_konten_utama(badan)
+        badan.bind("<Button-1>", lambda e: self.root.focus_set())
+
+    def buat_sidebar(self, induk):
+        sidebar = tk.Frame(induk, bg=SIDEBAR, width=321)
+        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.pack_propagate(False)
+        sidebar.bind("<Button-1>", lambda e: self.root.focus_set())
+
+        # Ikon menu
+        self.buat_ikon(sidebar, "menu", SIDEBAR).pack(anchor="w", padx=18, pady=(14, 0))
+
+        # Kotak pencarian
+        batas = tk.Frame(sidebar, bg="#8A8A8A", height=40)
+        batas.pack(fill="x", padx=17, pady=(14, 18))
+        batas.pack_propagate(False)
+        dalam = tk.Frame(batas, bg="#F9F9F9")
+        dalam.pack(fill="both", expand=True, padx=1, pady=1)
+        self.buat_ikon(dalam, "search", "#F9F9F9").pack(side="right", padx=(0, 10))
+
+        # Sidebar dibuat ulang tiap pindah halaman, jadi status placeholder direset di sini
+        self.placeholder_aktif = True
+        self.kata_cari = tk.StringVar(value=PLACEHOLDER)
+        self.entry_cari = tk.Entry(
+            dalam,
+            textvariable=self.kata_cari,
+            bg="#F9F9F9",
+            fg="#5F5F5F",
+            insertbackground=TEKS,
+            relief="flat",
+            bd=0,
             highlightthickness=0,
-            font=self._font(17),
+            font=self.font(17),
         )
-        self.search_entry.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(self._px(11), self._px(4)),
-        )
-        search_icon = tk.Label(
-            search_inner,
-            image=self.icons["search"],
-            bg=self.SEARCH_BG,
-        )
-        search_icon.grid(row=0, column=1, padx=(0, self._px(10)))
-        self.search_entry.bind("<FocusIn>", self._clear_search_placeholder)
-        self.search_entry.bind("<FocusOut>", self._restore_search_placeholder)
-        self.search_entry.bind("<KeyRelease>", self._filter_cards)
+        self.entry_cari.pack(side="left", fill="both", expand=True, padx=(11, 4))
+        self.entry_cari.bind("<FocusIn>", self.saat_fokus_cari)
+        self.entry_cari.bind("<FocusOut>", self.saat_lepas_fokus_cari)
+        self.entry_cari.bind("<KeyRelease>", lambda e: self.gambar_kartu())
 
-        new_recipe = self._nav_row(
-            sidebar,
-            row=2,
-            icon="plus",
-            text="New recipe",
-            active=False,
-            command=self._open_new_recipe,
-        )
-        home = self._nav_row(
-            sidebar,
-            row=3,
-            icon="home",
-            text="Home",
-            active=True,
-            command=lambda: self._select_tab("Resep"),
-        )
-        self.nav_rows = {"new": new_recipe, "home": home}
+        # Menu navigasi
+        self.buat_menu_item(sidebar, "plus", "Resep baru", False, lambda: self.tampil_form())
+        self.buat_menu_item(sidebar, "home", "Beranda", True, lambda: self.pilih_tab("Resep"))
 
-    def _nav_row(
-        self,
-        parent: tk.Frame,
-        row: int,
-        icon: str,
-        text: str,
-        active: bool,
-        command: Callable[[], None],
-    ) -> tk.Frame:
-        color = self.ACCENT if active else self.TEXT
-        row_frame = tk.Frame(parent, bg=self.SIDEBAR, height=self._px(60), cursor="hand2")
-        row_frame.grid(row=row, column=0, sticky="ew")
-        row_frame.grid_propagate(False)
+    def buat_menu_item(self, induk, ikon, teks, aktif, perintah):
+        warna = ORANYE if aktif else TEKS
+        baris = tk.Frame(induk, bg=SIDEBAR, height=60, cursor="hand2")
+        baris.pack(fill="x")
+        baris.pack_propagate(False)
+        if aktif:
+            tk.Frame(baris, bg=ORANYE, width=5).place(x=0, y=4, height=52)
+        gambar = self.buat_ikon(baris, ikon, SIDEBAR)
+        gambar.place(x=20, rely=0.5, anchor="w")
+        label = tk.Label(baris, text=teks, bg=SIDEBAR, fg=warna, font=self.font(18), anchor="w")
+        label.place(x=61, y=0, relheight=1, width=240)
+        for widget in (baris, gambar, label):
+            widget.bind("<Button-1>", lambda e: perintah())
 
-        if active:
-            tk.Frame(row_frame, bg=self.ACCENT, width=self._px(5)).place(
-                x=0,
-                y=self._px(4),
-                height=self._px(52),
-            )
-        icon_label = tk.Label(row_frame, image=self.icons[icon], bg=self.SIDEBAR)
-        icon_label.place(
-            x=self._px(20),
-            y=self._px(18),
-            width=self._px(24),
-            height=self._px(24),
-        )
-        text_label = tk.Label(
-            row_frame,
-            text=text,
-            bg=self.SIDEBAR,
-            fg=color,
-            font=self._font(18),
-            anchor="w",
-        )
-        text_label.place(
-            x=self._px(61),
-            y=0,
-            relheight=1,
-            width=self._px(240),
-        )
-        for widget in (row_frame, icon_label, text_label):
-            widget.bind("<Button-1>", lambda _event: command())
-        return row_frame
+    def buat_konten_utama(self, induk):
+        utama = tk.Frame(induk, bg=LATAR)
+        utama.grid(row=0, column=1, sticky="nsew")
+        utama.bind("<Button-1>", lambda e: self.root.focus_set())
 
-    def _build_main(self, parent: tk.Frame) -> None:
-        main = tk.Frame(parent, bg=self.WINDOW_BG)
-        main.grid(row=0, column=1, sticky="nsew")
-        main.grid_columnconfigure(0, weight=1)
+        self.judul_halaman = tk.Label(utama, bg=LATAR, fg=TEKS, font=self.font(26), anchor="w")
+        self.judul_halaman.pack(fill="x", padx=30, pady=(16, 6))
 
-        header = tk.Frame(main, bg=self.WINDOW_BG, height=self._px(70))
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        self.heading = tk.Label(
-            header,
-            text=f"Semua Resep ({self._total_recipes()})",
-            bg=self.WINDOW_BG,
-            fg=self.TEXT,
-            font=self._font(26),
-            anchor="w",
-        )
-        self.heading.pack(side="left", fill="y", padx=self._px(30))
-
-        tabs = tk.Frame(main, bg=self.WINDOW_BG, height=self._px(50))
-        tabs.grid(row=1, column=0, sticky="ew")
-        tabs.grid_propagate(False)
-        tab_row = tk.Frame(tabs, bg=self.WINDOW_BG)
-        tab_row.pack(side="left", fill="y", padx=self._px(30))
-
-        self.tab_labels: dict[str, tk.Label] = {}
-        for column, name, width in ((0, "Resep", 120), (2, "Favorit", 130)):
-            tab = tk.Label(
-                tab_row,
-                text=name,
-                bg=self.WINDOW_BG,
-                fg=self.TEXT if name == self.active_tab else self.MUTED,
-                font=self._font(24),
-                anchor="w",
+        baris_tab = tk.Frame(utama, bg=LATAR)
+        baris_tab.pack(fill="x", padx=30, pady=(0, 14))
+        self.label_tab = {}
+        for nama in ("Resep", "Favorit"):
+            label = tk.Label(
+                baris_tab,
+                text=nama,
+                bg=LATAR,
+                fg=TEKS if nama == self.tab_aktif else REDUP,
+                font=self.font(24),
                 cursor="hand2",
             )
-            tab.grid(row=0, column=column, sticky="nsew")
-            tab_row.grid_columnconfigure(column, minsize=self._px(width))
-            tab.bind("<Button-1>", lambda _event, value=name: self._select_tab(value))
-            self.tab_labels[name] = tab
-        tab_row.grid_columnconfigure(1, minsize=self._px(28))
+            label.pack(side="left", padx=(0, 40))
+            label.bind("<Button-1>", lambda e, n=nama: self.pilih_tab(n))
+            self.label_tab[nama] = label
 
-        # Area kartu: canvas yang bisa di-scroll hanya ketika isi melebihi tinggi area.
-        main.grid_rowconfigure(2, weight=1)
-        self.card_scrollbar = ttk.Scrollbar(main, orient="vertical")
-        self.card_canvas = tk.Canvas(
-            main,
-            bg=self.WINDOW_BG,
-            highlightthickness=0,
-            yscrollincrement=self._px(30),
-            yscrollcommand=self._on_cards_scroll,
+        wadah, self.kanvas_kartu, self.isi_kartu = self.buat_area_scroll(
+            utama, LATAR, dengan_scrollbar=True
         )
-        self.card_canvas.grid(
-            row=2,
-            column=0,
-            sticky="nsew",
-            padx=(self._px(30), self._px(10)),
-            pady=(0, self._px(20)),
-        )
-        self.card_scrollbar.configure(command=self.card_canvas.yview)
+        wadah.pack(fill="both", expand=True, padx=(30, 10), pady=(0, 20))
+        self.kanvas_kartu.bind("<Configure>", self.saat_ukuran_kartu_berubah, add="+")
 
-        self.card_area = tk.Frame(self.card_canvas, bg=self.WINDOW_BG)
-        self._cards_window = self.card_canvas.create_window(
-            (0, 0), window=self.card_area, anchor="nw"
-        )
-        self.card_canvas.bind("<Configure>", self._on_cards_canvas_configure)
-        self.card_area.bind("<Configure>", lambda _e: self._sync_cards_scroll())
-        self.root.bind_all("<MouseWheel>", self._on_home_wheel)
+        self.perbarui_judul()
+        self.gambar_kartu()
 
-        # Perkiraan jumlah kolom awal; dihitung ulang saat ukuran canvas diketahui.
-        self._cards_cols = self._calc_columns(
-            self._px(1317) - self._px(321) - self._px(30) - self._px(20)
-        )
-        self._render_cards()
+    def saat_ukuran_kartu_berubah(self, event):
+        kolom = max(1, (event.width + 10) // (177 + 10))
+        if kolom != self.kolom_kartu:
+            self.kolom_kartu = kolom
+            self.gambar_kartu()
 
-    def _show_home_view(self) -> None:
-        self.current_view = "home"
-        self.current_recipe = None
-        self.editing_recipe = None
-        self._set_titlebar_back(False)
-        for child in self.content.winfo_children():
-            child.destroy()
+    def perbarui_judul(self):
+        if self.tab_aktif == "Favorit":
+            jumlah = sum(1 for r in self.resep if r["favorite"])
+            self.judul_halaman.config(text=f"Favorit ({jumlah})")
+        else:
+            self.judul_halaman.config(text=f"Semua Resep ({len(self.resep)})")
 
-        body = tk.Frame(self.content, bg=self.WINDOW_BG)
-        body.pack(fill="both", expand=True)
-        body.grid_rowconfigure(0, weight=1)
-        body.grid_columnconfigure(0, minsize=self._px(321))
-        body.grid_columnconfigure(1, weight=1)
-        self._build_sidebar(body)
-        self._build_main(body)
-        body.bind("<Button-1>", lambda _event: self.root.focus_set())
+    def pilih_tab(self, nama):
+        self.tab_aktif = nama
+        for n, label in self.label_tab.items():
+            label.config(fg=TEKS if n == nama else REDUP)
+        self.perbarui_judul()
+        self.gambar_kartu()
 
-    def _show_recipe_form(self, recipe_to_edit: dict[str, object] | None = None) -> None:
-        self.current_view = "form"
-        self.editing_recipe = recipe_to_edit
-        self._set_titlebar_back(True)
-        for child in self.content.winfo_children():
-            child.destroy()
-
-        header = tk.Frame(self.content, bg=self.SIDEBAR, height=self._px(70))
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        tk.Label(
-            header,
-            text="Edit Resep" if recipe_to_edit else "Resep Baru",
-            bg=self.SIDEBAR,
-            fg=self.TEXT,
-            font=self._font(30),
-            anchor="w",
-        ).pack(side="left", fill="y", padx=self._px(30))
-
-        self._header_action(
-            header, "Batal", "cancel", 103, False, self._cancel_recipe_form
-        ).pack(side="right", padx=(0, self._px(30)), pady=self._px(15))
-        self._header_action(
-            header, "Simpan", "save", 120, True, self._save_recipe
-        ).pack(side="right", padx=(0, self._px(12)), pady=self._px(15))
-
-        form_body = tk.Frame(self.content, bg=self.SIDEBAR)
-        form_body.pack(fill="both", expand=True)
-        form_body.grid_columnconfigure(0, weight=1)
-        form_body.grid_rowconfigure(0, minsize=self._px(110))
-        form_body.grid_rowconfigure(1, minsize=self._px(20))
-        form_body.grid_rowconfigure(2, weight=1)
-        form_body.grid_rowconfigure(3, minsize=self._px(30))
-
-        layout = tk.Frame(form_body, bg=self.SIDEBAR)
-        layout.grid(row=0, column=0, rowspan=4, sticky="nsew")
-        layout.grid_columnconfigure(0, weight=1)
-        layout.grid_rowconfigure(0, minsize=self._px(110))
-        layout.grid_rowconfigure(1, minsize=self._px(20))
-        layout.grid_rowconfigure(2, weight=1)
-        layout.grid_rowconfigure(3, minsize=self._px(30))
-
-        top_card = self._bordered_panel(
-            layout,
-            row=0,
-            column=0,
-            columnspan=3,
-            padx=(self._px(30), self._px(30)),
-            height=110,
-        )
-        top_card.grid_columnconfigure(0, weight=1)
-        top_card.grid_rowconfigure(0, minsize=self._px(51))
-        top_card.grid_rowconfigure(1, weight=1)
-        self._step_heading(top_card, 1, "Nama Makanan")
-
-        self.recipe_title_var = tk.StringVar()
-        self.form_title_entry = tk.Entry(
-            top_card,
-            textvariable=self.recipe_title_var,
-            bg=self.WINDOW_BG,
-            fg=self.TEXT,
-            insertbackground=self.TEXT,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=self._px(1),
-            highlightbackground="#D0D0D0",
-            highlightcolor="#1A6FD0",
-            font=self._font(17),
-        )
-        self.form_title_entry.grid(
-            row=1,
-            column=0,
-            sticky="nsew",
-            padx=self._px(19),
-            pady=(0, self._px(15)),
-            ipady=self._px(5),
-        )
-        self.form_title_entry.bind("<Return>", lambda _event: self.ingredients_text.focus_set())
-
-        layout.grid_columnconfigure(0, weight=459, minsize=self._px(1))
-        layout.grid_columnconfigure(1, minsize=self._px(20))
-        layout.grid_columnconfigure(2, weight=776, minsize=self._px(1))
-        ingredients_card = self._bordered_panel(
-            layout,
-            row=2,
-            column=0,
-            padx=(self._px(30), 0),
-        )
-        directions_card = self._bordered_panel(
-            layout,
-            row=2,
-            column=2,
-            padx=(0, self._px(30)),
-        )
-
-        for surface in (ingredients_card, directions_card):
-            surface.grid_columnconfigure(0, weight=1)
-            surface.grid_rowconfigure(0, minsize=self._px(51))
-            surface.grid_rowconfigure(1, weight=1)
-
-        self._step_heading(ingredients_card, 2, "Bahan")
-        self._step_heading(directions_card, 3, "Langkah")
-        self.ingredients_text = tk.Text(
-            ingredients_card,
-            bg=self.WINDOW_BG,
-            fg=self.TEXT,
-            insertbackground=self.TEXT,
-            font=self._font(16),
-            wrap="word",
-            undo=True,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=self._px(1),
-            highlightbackground="#D0D0D0",
-            highlightcolor="#1A6FD0",
-            padx=self._px(9),
-            pady=self._px(8),
-        )
-        self.ingredients_text.grid(
-            row=1,
-            column=0,
-            sticky="nsew",
-            padx=self._px(19),
-            pady=(0, self._px(19)),
-        )
-        self.directions_text = tk.Text(
-            directions_card,
-            bg=self.WINDOW_BG,
-            fg=self.TEXT,
-            insertbackground=self.TEXT,
-            font=self._font(16),
-            wrap="word",
-            undo=True,
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=self._px(1),
-            highlightbackground="#D0D0D0",
-            highlightcolor="#1A6FD0",
-            padx=self._px(9),
-            pady=self._px(8),
-        )
-        self.directions_text.grid(
-            row=1,
-            column=0,
-            sticky="nsew",
-            padx=self._px(19),
-            pady=(0, self._px(19)),
-        )
-        if recipe_to_edit:
-            self.recipe_title_var.set(str(recipe_to_edit.get("name", "")))
-            self.ingredients_text.insert(
-                "1.0", self._format_ingredients(recipe_to_edit.get("ingredients", []))
-            )
-            self.directions_text.insert(
-                "1.0", self._format_directions(recipe_to_edit.get("directions", []))
-            )
-        self.form_title_entry.focus_set()
-        self.content.bind("<Escape>", lambda _event: self._cancel_recipe_form())
-
-    def _format_ingredients(self, ingredients: object) -> str:
-        if isinstance(ingredients, str):
-            return ingredients
-        if not isinstance(ingredients, (list, tuple)):
+    def kata_pencarian(self):
+        if self.placeholder_aktif:
             return ""
-        lines: list[str] = []
-        for ingredient in ingredients:
-            if isinstance(ingredient, (list, tuple)) and len(ingredient) >= 2:
-                lines.append(f"{ingredient[0]} | {ingredient[1]}")
-            elif isinstance(ingredient, dict):
-                lines.append(
-                    f"{ingredient.get('quantity', '')} | {ingredient.get('name', '')}"
-                )
+        return self.kata_cari.get().strip().casefold()
+
+    def gambar_kartu(self):
+        for widget in self.isi_kartu.winfo_children():
+            widget.destroy()
+
+        kata = self.kata_pencarian()
+        tampil = []
+        for r in self.resep:
+            cocok = kata in r["name"].casefold()
+            if self.tab_aktif == "Favorit" and not r["favorite"]:
+                cocok = False
+            if cocok:
+                tampil.append(r)
+
+        for nomor, r in enumerate(tampil):
+            baris, kolom = divmod(nomor, self.kolom_kartu)
+            self.buat_kartu(r, baris, kolom)
+
+        if not tampil:
+            if self.tab_aktif == "Favorit":
+                pesan = "Belum ada resep favorit"
+            elif not self.resep:
+                pesan = "Belum ada resep. Klik “Resep baru” untuk menambahkan."
             else:
-                lines.append(str(ingredient))
-        return "\n".join(lines)
+                pesan = "Resep tidak ditemukan"
+            tk.Label(self.isi_kartu, text=pesan, bg=LATAR, fg=REDUP, font=self.font(16)).grid(
+                row=0, column=0, sticky="w"
+            )
+        self.kanvas_kartu.yview_moveto(0)
 
-    def _format_directions(self, directions: object) -> str:
-        if isinstance(directions, str):
-            return directions
-        if isinstance(directions, (list, tuple)):
-            return "\n".join(str(step) for step in directions)
-        return ""
+    def buat_kartu(self, r, baris, kolom):
+        kartu = tk.Frame(self.isi_kartu, bg=r["color"], width=177, height=177, cursor="hand2")
+        kartu.grid(row=baris, column=kolom, sticky="nw", padx=(0, 10), pady=(0, 10))
+        kartu.pack_propagate(False)
+        bar = tk.Frame(kartu, bg=ORANYE, height=38, cursor="hand2")
+        bar.place(x=0, y=139, width=177, height=38)
+        bar.pack_propagate(False)
+        nama = tk.Label(
+            bar, text=r["name"], bg=ORANYE, fg=PUTIH, font=self.font(24), anchor="w", cursor="hand2"
+        )
+        nama.pack(side="left", padx=(8, 0))
+        widget_klik = [kartu, bar, nama]
+        gambar = self.muat_foto(self.path_foto(r.get("photo")), 177, 177)
+        if gambar:
+            label_foto = tk.Label(kartu, image=gambar, bg=r["color"], bd=0, cursor="hand2")
+            label_foto.image = gambar
+            label_foto.place(x=0, y=0)
+            bar.lift()  # bar nama tetap di atas foto
+            widget_klik.append(label_foto)
+        for widget in widget_klik:
+            widget.bind("<Button-1>", lambda e, r=r: self.tampil_detail(r))
 
-    def _cancel_recipe_form(self) -> None:
-        if self.editing_recipe is not None:
-            self._show_recipe_detail(self.editing_recipe)
-        else:
-            self._show_home_view()
+    # ------------------------------------------------------ pencarian
+    def saat_fokus_cari(self, _event):
+        if self.placeholder_aktif:
+            self.kata_cari.set("")
+            self.entry_cari.config(fg=TEKS)
+            self.placeholder_aktif = False
 
-    def _navigate_back(self) -> None:
-        if self.current_view == "form":
-            self._cancel_recipe_form()
-        elif self.current_view == "detail":
-            self._show_home_view()
-        else:
-            self._show_home_view()
+    def saat_lepas_fokus_cari(self, _event):
+        if not self.kata_cari.get().strip():
+            self.kata_cari.set(PLACEHOLDER)
+            self.entry_cari.config(fg="#5F5F5F")
+            self.placeholder_aktif = True
+            self.gambar_kartu()
 
-    def _save_recipe(self) -> None:
-        name = self.recipe_title_var.get().strip()
-        if not name:
-            self.form_title_entry.configure(highlightbackground=self.ACCENT)
-            self.form_title_entry.focus_set()
+    # ------------------------------------------------------ DETAIL RESEP
+    def tampil_detail(self, r):
+        self.bersihkan_halaman()
+        self.resep_dipilih = r
+        self.resep_diedit = None
+
+        kepala = self.buat_kepala("Resep", self.tampil_beranda)
+        teks_favorit = "Hapus Favorit" if r["favorite"] else "Tambah Favorit"
+        self.buat_tombol(kepala, teks_favorit, "star", self.ubah_favorit).pack(
+            side="right", padx=(0, 30), pady=15
+        )
+        self.buat_tombol(kepala, "Hapus", "trash", self.hapus_resep, warna_teks=MERAH).pack(
+            side="right", padx=(0, 12), pady=15
+        )
+        self.buat_tombol(kepala, "Edit", "edit", lambda: self.tampil_form(r)).pack(
+            side="right", padx=(0, 12), pady=15
+        )
+
+        badan = tk.Frame(self.halaman, bg=SIDEBAR)
+        badan.pack(fill="both", expand=True, padx=30, pady=(20, 30))
+        badan.grid_columnconfigure(0, minsize=400)
+        badan.grid_columnconfigure(1, weight=1)
+        badan.grid_rowconfigure(0, minsize=400)
+        badan.grid_rowconfigure(1, weight=1)
+
+        # Foto (blok warna) + nama resep
+        foto = self.buat_panel(badan)
+        foto.grid(row=0, column=0, sticky="nsew", padx=(0, 20), pady=(0, 20))
+        area_foto = tk.Frame(foto, bg=r["color"])
+        area_foto.pack(fill="both", expand=True)
+        gambar = self.muat_foto(
+            self.path_foto(r.get("photo")), UKURAN_FOTO_DETAIL, UKURAN_FOTO_DETAIL
+        )
+        if gambar:
+            label_foto = tk.Label(area_foto, image=gambar, bg=r["color"], bd=0)
+            label_foto.image = gambar
+            label_foto.place(x=0, y=0)
+        bar_nama = tk.Frame(area_foto, bg=ORANYE, height=56)
+        bar_nama.place(x=0, rely=1.0, anchor="sw", relwidth=1, height=56)
+        bar_nama.pack_propagate(False)
+        tk.Label(
+            bar_nama, text=r["name"], bg=ORANYE, fg=PUTIH, font=self.font(26), anchor="w"
+        ).pack(fill="both", expand=True, padx=14)
+
+        # Panel bahan
+        panel_bahan = self.buat_panel(badan)
+        panel_bahan.grid(row=1, column=0, sticky="nsew", padx=(0, 20))
+        self.buat_judul_panel(panel_bahan, "Bahan")
+        wadah, _kanvas, isi = self.buat_area_scroll(panel_bahan, PUTIH)
+        wadah.pack(fill="both", expand=True, padx=19, pady=(0, 19))
+        daftar = self.daftar_bahan(r["ingredients"])
+        for nomor, (takaran, bahan) in enumerate(daftar):
+            baris = tk.Frame(isi, bg=PUTIH)
+            baris.pack(fill="x")
+            tk.Label(
+                baris, text=takaran, bg=PUTIH, fg=TEKS, font=self.font(17, True),
+                width=14, anchor="w",
+            ).pack(side="left", pady=16)
+            tk.Label(
+                baris, text=bahan, bg=PUTIH, fg=TEKS, font=self.font(17),
+                anchor="w", justify="left", wraplength=210,
+            ).pack(side="left", pady=16)
+            if nomor < len(daftar) - 1:
+                tk.Frame(isi, bg="#E6E6E6", height=1).pack(fill="x")
+        if not daftar:
+            tk.Label(wadah, text="Belum ada bahan", bg=PUTIH, fg=REDUP, font=self.font(17)).place(
+                relx=0.5, rely=0.5, anchor="center"
+            )
+
+        # Panel langkah
+        panel_langkah = self.buat_panel(badan)
+        panel_langkah.grid(row=0, column=1, rowspan=2, sticky="nsew")
+        self.buat_judul_panel(panel_langkah, "Langkah")
+        wadah, _kanvas, isi = self.buat_area_scroll(panel_langkah, PUTIH)
+        wadah.pack(fill="both", expand=True, padx=19, pady=(0, 19))
+        langkah = self.daftar_langkah(r["directions"])
+        for nomor, teks in enumerate(langkah):
+            baris = tk.Frame(isi, bg=PUTIH)
+            baris.pack(fill="x")
+            self.buat_lingkaran(baris, nomor + 1, 32, 16).pack(
+                side="left", anchor="n", padx=(0, 18), pady=18
+            )
+            label = tk.Label(
+                baris, text=teks, bg=PUTIH, fg=TEKS, font=self.font(18),
+                anchor="nw", justify="left", wraplength=600,
+            )
+            label.pack(side="left", fill="x", expand=True, anchor="n", pady=14)
+            baris.bind(
+                "<Configure>",
+                lambda e, label=label: label.config(wraplength=max(200, e.width - 90)),
+            )
+            if nomor < len(langkah) - 1:
+                tk.Frame(isi, bg="#E6E6E6", height=1).pack(fill="x")
+        if not langkah:
+            tk.Label(wadah, text="Belum ada langkah", bg=PUTIH, fg=REDUP, font=self.font(17)).place(
+                relx=0.5, rely=0.5, anchor="center"
+            )
+
+    def buat_judul_panel(self, panel, judul):
+        kepala = tk.Frame(panel, bg=PUTIH)
+        kepala.pack(fill="x", padx=19, pady=(14, 8))
+        tk.Frame(kepala, bg=ORANYE, width=4, height=22).pack(side="left")
+        tk.Label(kepala, text=judul, bg=PUTIH, fg=TEKS, font=self.font(20, True)).pack(
+            side="left", padx=(10, 0)
+        )
+
+    def ubah_favorit(self):
+        r = self.resep_dipilih
+        r["favorite"] = not r["favorite"]
+        # TODO: simpan perubahan favorit ke database MySQL di sini
+        self.tampil_detail(r)
+
+    def hapus_resep(self):
+        r = self.resep_dipilih
+        if not messagebox.askyesno("Hapus resep", f"Hapus resep “{r['name']}”?", parent=self.root):
             return
+        self.resep.remove(r)
+        # TODO: hapus resep dari database MySQL di sini
+        self.tampil_beranda()
 
-        values = {
-            "name": name,
-            "ingredients": self.ingredients_text.get("1.0", "end-1c").strip(),
-            "directions": self.directions_text.get("1.0", "end-1c").strip(),
+    # ------------------------------------------------------ FORM RESEP
+    def tampil_form(self, r=None):
+        self.bersihkan_halaman()
+        self.resep_diedit = r
+        judul = "Edit Resep" if r else "Resep Baru"
+
+        kepala = self.buat_kepala(judul, self.batal_form)
+        self.buat_tombol(kepala, "Batal", "cancel", self.batal_form).pack(
+            side="right", padx=(0, 30), pady=15
+        )
+        self.buat_tombol(kepala, "Simpan", "save", self.simpan_resep, utama=True).pack(
+            side="right", padx=(0, 12), pady=15
+        )
+        self.root.bind("<Escape>", lambda e: self.batal_form())
+
+        badan = tk.Frame(self.halaman, bg=SIDEBAR)
+        badan.pack(fill="both", expand=True, padx=30, pady=(20, 30))
+        badan.grid_columnconfigure(0, weight=459)
+        badan.grid_columnconfigure(1, weight=776)
+        badan.grid_rowconfigure(1, weight=1)
+
+        # 1. Nama makanan
+        kartu_nama = self.buat_panel(badan)
+        kartu_nama.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 20))
+        self.buat_judul_langkah(kartu_nama, 1, "Nama Makanan")
+        self.var_nama = tk.StringVar(value=r["name"] if r else "")
+        self.entry_nama = self.buat_entry(kartu_nama, self.var_nama)
+        self.entry_nama.config(font=self.font(17))
+        self.entry_nama.pack(fill="x", padx=19, pady=(0, 10), ipady=5)
+        self.entry_nama.bind("<Return>", lambda e: self.fokus_bahan_pertama())
+
+        # Foto (opsional)
+        self.foto_form = self.path_foto(r.get("photo")) if r else None
+        self.foto_form_baru = False
+        baris_foto = tk.Frame(kartu_nama, bg=PUTIH)
+        baris_foto.pack(fill="x", padx=19, pady=(0, 15))
+        self.label_pratinjau = tk.Label(baris_foto, bg=PUTIH, bd=0)
+        self.label_pratinjau.pack(side="left", padx=(0, 12))
+        self.buat_tombol(baris_foto, "Pilih foto", "photo", self.pilih_foto).pack(side="left")
+        self.buat_tombol(baris_foto, "Hapus foto", "cancel", self.hapus_foto_form).pack(
+            side="left", padx=(10, 0)
+        )
+        self.label_info_foto = tk.Label(
+            baris_foto, bg=PUTIH, fg=REDUP, font=self.font(15), anchor="w"
+        )
+        self.label_info_foto.pack(side="left", padx=(14, 0))
+        self.perbarui_pratinjau_foto()
+
+        # 2. Bahan
+        kartu_bahan = self.buat_panel(badan)
+        kartu_bahan.grid(row=1, column=0, sticky="nsew", padx=(0, 20))
+        self.buat_judul_langkah(kartu_bahan, 2, "Bahan")
+        self.buat_editor_bahan(kartu_bahan, r)
+
+        # 3. Langkah (satu langkah per baris)
+        kartu_langkah = self.buat_panel(badan)
+        kartu_langkah.grid(row=1, column=1, sticky="nsew")
+        self.buat_judul_langkah(kartu_langkah, 3, "Langkah")
+        self.teks_langkah = tk.Text(
+            kartu_langkah,
+            width=1,
+            height=1,
+            bg=LATAR,
+            fg=TEKS,
+            insertbackground=TEKS,
+            font=self.font(16),
+            wrap="word",
+            undo=True,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=GARIS,
+            highlightcolor=FOKUS,
+            padx=9,
+            pady=8,
+        )
+        self.teks_langkah.pack(fill="both", expand=True, padx=19, pady=(0, 19))
+        if r:
+            self.teks_langkah.insert("1.0", "\n".join(self.daftar_langkah(r["directions"])))
+
+        self.entry_nama.focus_set()
+
+    def buat_judul_langkah(self, panel, nomor, judul):
+        kepala = tk.Frame(panel, bg=PUTIH)
+        kepala.pack(fill="x", padx=19, pady=(12, 10))
+        self.buat_lingkaran(kepala, nomor, 28, 15).pack(side="left")
+        tk.Label(kepala, text=judul, bg=PUTIH, fg=TEKS, font=self.font(19)).pack(
+            side="left", padx=(12, 0)
+        )
+
+    def buat_editor_bahan(self, kartu, r):
+        """Daftar baris 'Takaran' + 'Bahan'. Tidak perlu tanda | lagi."""
+        self.baris_bahan = []
+        isi_kartu = tk.Frame(kartu, bg=PUTIH)
+        isi_kartu.pack(fill="both", expand=True, padx=19, pady=(0, 19))
+
+        judul_kolom = tk.Frame(isi_kartu, bg=PUTIH)
+        judul_kolom.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            judul_kolom, text="Takaran", width=12, anchor="w", bg=PUTIH, fg=REDUP, font=self.font(16)
+        ).pack(side="left")
+        tk.Label(judul_kolom, text="Bahan", anchor="w", bg=PUTIH, fg=REDUP, font=self.font(16)).pack(
+            side="left", padx=(8, 0)
+        )
+
+        # Tombol tambah dipasang dulu di bawah supaya selalu terlihat
+        self.buat_tombol(
+            isi_kartu, "Tambah bahan", "plus", lambda: self.tambah_baris_bahan(fokus=True)
+        ).pack(side="bottom", anchor="w", pady=(12, 0))
+
+        wadah, self.kanvas_bahan, self.isi_bahan = self.buat_area_scroll(isi_kartu, PUTIH)
+        wadah.pack(fill="both", expand=True)
+
+        data = self.daftar_bahan(r["ingredients"]) if r else []
+        for takaran, bahan in data or [("", "")]:
+            self.tambah_baris_bahan(takaran, bahan)
+
+    def tambah_baris_bahan(self, takaran="", bahan="", fokus=False):
+        baris = tk.Frame(self.isi_bahan, bg=PUTIH)
+        baris.pack(fill="x", pady=(0, 8))
+
+        var_takaran = tk.StringVar(value=takaran)
+        var_bahan = tk.StringVar(value=bahan)
+        entry_takaran = self.buat_entry(baris, var_takaran, 12)
+        entry_takaran.pack(side="left", ipady=5)
+
+        gambar = self.ikon.get("cancel")
+        tombol_hapus = tk.Button(
+            baris,
+            image=gambar,
+            bg=PUTIH,
+            activebackground="#F5F5F5",
+            relief="flat",
+            bd=0,
+            padx=8,
+            cursor="hand2",
+        )
+        tombol_hapus.pack(side="right", padx=(8, 0))
+
+        entry_bahan = self.buat_entry(baris, var_bahan, 1)
+        entry_bahan.pack(side="left", fill="x", expand=True, padx=(8, 0), ipady=5)
+
+        item = {
+            "baris": baris,
+            "takaran": var_takaran,
+            "bahan": var_bahan,
+            "entry_takaran": entry_takaran,
+            "entry_bahan": entry_bahan,
         }
-        if self.editing_recipe is not None:
-            self.editing_recipe.update(values)
-            self._show_recipe_detail(self.editing_recipe)
+        self.baris_bahan.append(item)
+
+        def hapus_baris():
+            self.baris_bahan.remove(item)
+            baris.destroy()
+            if not self.baris_bahan:
+                self.tambah_baris_bahan()
+
+        def saat_enter_bahan(_event):
+            nomor = self.baris_bahan.index(item)
+            if nomor < len(self.baris_bahan) - 1:
+                self.baris_bahan[nomor + 1]["entry_takaran"].focus_set()
+            elif var_takaran.get().strip() or var_bahan.get().strip():
+                self.tambah_baris_bahan(fokus=True)
+
+        tombol_hapus.config(command=hapus_baris)
+        entry_takaran.bind("<Return>", lambda e: entry_bahan.focus_set())
+        entry_bahan.bind("<Return>", saat_enter_bahan)
+
+        if fokus:
+            self.kanvas_bahan.update_idletasks()
+            self.kanvas_bahan.yview_moveto(1.0)
+            entry_takaran.focus_set()
+
+    def pilih_foto(self):
+        if not PIL_ADA:
+            messagebox.showinfo(
+                "Pillow belum terpasang",
+                "Fitur foto membutuhkan Pillow.\nJalankan di terminal:\n\npip install pillow",
+                parent=self.root,
+            )
             return
-
-        color = self.recipe_colors[len(self.recipes) % len(self.recipe_colors)]
-        self.recipes.append({**values, "color": color, "favorite": False})
-        self.recipe_count += 1
-        self.active_tab = "Resep"
-        self._show_home_view()
-
-    def _show_recipe_detail(self, recipe: dict[str, object]) -> None:
-        self.current_view = "detail"
-        self.current_recipe = recipe
-        self.editing_recipe = None
-        self._set_titlebar_back(True)
-        for child in self.content.winfo_children():
-            child.destroy()
-
-        header = tk.Frame(self.content, bg=self.SIDEBAR, height=self._px(70))
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        tk.Label(
-            header,
-            text="Recipe",
-            bg=self.SIDEBAR,
-            fg=self.TEXT,
-            font=self._font(30),
-            anchor="w",
-        ).pack(side="left", fill="y", padx=self._px(30))
-
-        self.favorite_button = self._header_action(
-            header,
-            "Hapus Favorit" if recipe.get("favorite", False) else "Tambah Favorit",
-            "star",
-            187,
-            False,
-            self._toggle_favorite,
-        )
-        self.favorite_button.pack(side="right", padx=(0, self._px(31)), pady=self._px(15))
-        self._header_action(
-            header,
-            "Hapus",
-            "trash",
-            112,
-            False,
-            self._delete_recipe,
-            foreground="#C42B1C",
-        ).pack(side="right", padx=(0, self._px(13)), pady=self._px(15))
-        self._header_action(
-            header,
-            "Edit",
-            "edit",
-            100,
-            False,
-            lambda: self._show_recipe_form(recipe),
-        ).pack(side="right", padx=(0, self._px(13)), pady=self._px(15))
-
-        body = tk.Frame(self.content, bg=self.SIDEBAR)
-        body.pack(fill="both", expand=True)
-        layout = tk.Frame(body, bg=self.SIDEBAR)
-        layout.pack(fill="both", expand=True)
-        layout.grid_columnconfigure(0, weight=420)
-        layout.grid_columnconfigure(1, minsize=self._px(20))
-        layout.grid_columnconfigure(2, weight=817)
-        layout.grid_rowconfigure(0, minsize=self._px(300))
-        layout.grid_rowconfigure(1, minsize=self._px(20))
-        layout.grid_rowconfigure(2, weight=1)
-        layout.grid_rowconfigure(3, minsize=self._px(30))
-
-        photo = self._bordered_panel(
-            layout,
-            row=0,
-            column=0,
-            padx=(self._px(30), 0),
-            height=300,
-        )
-        photo.grid_rowconfigure(0, weight=1)
-        photo.grid_rowconfigure(1, minsize=self._px(56))
-        photo.grid_columnconfigure(0, weight=1)
-        tk.Frame(photo, bg=str(recipe.get("color", "#E2AE58"))).grid(
-            row=0, column=0, sticky="nsew"
-        )
-        name_bar = tk.Frame(photo, bg=self.ACCENT)
-        name_bar.grid(row=1, column=0, sticky="nsew")
-        tk.Label(
-            name_bar,
-            text=str(recipe.get("name", "Recipe")),
-            bg=self.ACCENT,
-            fg="#FFFFFF",
-            font=self._font(26),
-            anchor="w",
-        ).pack(fill="both", expand=True, padx=self._px(14))
-
-        ingredients_panel = self._bordered_panel(
-            layout,
-            row=2,
-            column=0,
-            padx=(self._px(30), 0),
-            height=406,
-        )
-        directions_panel = self._bordered_panel(
-            layout,
-            row=0,
-            column=2,
-            rowspan=3,
-            padx=(0, self._px(30)),
-            height=726,
-        )
-        self._detail_section_heading(ingredients_panel, "Ingredients")
-        self._detail_section_heading(directions_panel, "Directions")
-
-        ingredient_canvas, ingredient_rows = self._detail_scroll_area(
-            ingredients_panel, height=336
-        )
-        ingredient_list = self._ingredient_rows(recipe.get("ingredients", []))
-        if not ingredient_list:
-            ingredient_list = [("", "No ingredients added")]
-        for index, (quantity, item_name) in enumerate(ingredient_list):
-            row = tk.Frame(ingredient_rows, bg="#FFFFFF", height=self._px(56))
-            row.grid(row=index, column=0, sticky="ew")
-            row.grid_propagate(False)
-            row.grid_columnconfigure(0, minsize=self._px(170))
-            row.grid_columnconfigure(1, minsize=self._px(2))
-            row.grid_columnconfigure(2, weight=1)
-            tk.Label(
-                row,
-                text=quantity,
-                bg="#FFFFFF",
-                fg=self.TEXT,
-                font=(self.FONT, -self._px(17), "bold"),
-                anchor="w",
-            ).grid(row=0, column=0, sticky="w")
-            tk.Label(
-                row,
-                text=item_name,
-                bg="#FFFFFF",
-                fg=self.TEXT,
-                font=self._font(17),
-                anchor="w",
-            ).grid(row=0, column=2, sticky="w")
-            if index < len(ingredient_list) - 1:
-                tk.Frame(row, bg="#E6E6E6", height=self._px(1)).place(
-                    x=0, rely=1, relwidth=1, anchor="sw"
-                )
-        self._bind_list_wheel(ingredient_canvas, ingredient_rows)
-
-        direction_canvas, direction_rows = self._detail_scroll_area(
-            directions_panel, height=654
-        )
-        directions = self._direction_steps(recipe.get("directions", []))
-        if not directions:
-            directions = ["No directions added"]
-        for index, direction in enumerate(directions):
-            row_height = 120 if len(direction) > 120 else 96
-            row = tk.Frame(direction_rows, bg="#FFFFFF")
-            row.grid(row=index, column=0, sticky="ew")
-            row.grid_columnconfigure(1, weight=1)
-            direction_rows.grid_rowconfigure(index, minsize=self._px(row_height))
-
-            badge = tk.Canvas(
-                row,
-                width=self._px(32),
-                height=self._px(32),
-                bg="#FFFFFF",
-                highlightthickness=0,
-            )
-            badge.create_oval(
-                0, 0, self._px(32), self._px(32),
-                fill=self.ACCENT, outline=self.ACCENT,
-            )
-            badge.create_text(
-                self._px(16), self._px(16), text=str(index + 1),
-                fill="#FFFFFF", font=(self.FONT, -self._px(16), "bold"),
-            )
-            badge.grid(
-                row=0,
-                column=0,
-                sticky="n",
-                padx=(0, self._px(18)),
-                pady=self._px(18),
-            )
-            tk.Label(
-                row,
-                text=direction,
-                bg="#FFFFFF",
-                fg=self.TEXT,
-                font=self._font(18),
-                justify="left",
-                anchor="nw",
-                wraplength=self._px(700),
-            ).grid(row=0, column=1, sticky="ew", pady=(self._px(12), self._px(12)))
-            if index < len(directions) - 1:
-                tk.Frame(row, bg="#E6E6E6", height=self._px(1)).place(
-                    x=0, rely=1, relwidth=1, anchor="sw"
-                )
-        self._bind_list_wheel(direction_canvas, direction_rows)
-
-    def _detail_section_heading(self, parent: tk.Frame, title: str) -> None:
-        tk.Frame(parent, bg=self.ACCENT, width=self._px(4), height=self._px(22)).place(
-            x=self._px(19), y=self._px(17)
-        )
-        tk.Label(
-            parent,
-            text=title,
-            bg="#FFFFFF",
-            fg=self.TEXT,
-            font=(self.FONT, -self._px(20), "bold"),
-            anchor="w",
-        ).place(x=self._px(33), y=self._px(12), height=self._px(32))
-
-    def _detail_scroll_area(
-        self,
-        parent: tk.Frame,
-        height: int,
-    ) -> tuple[tk.Canvas, tk.Frame]:
-        canvas = tk.Canvas(
-            parent,
-            bg="#FFFFFF",
-            highlightthickness=0,
-            yscrollincrement=self._px(28),
-        )
-        canvas.place(
-            x=self._px(19),
-            y=self._px(55),
-            relwidth=1,
-            width=-self._px(38),
-            height=self._px(height),
-        )
-        rows = tk.Frame(canvas, bg="#FFFFFF")
-        rows.grid_columnconfigure(0, weight=1)
-        window_id = canvas.create_window((0, 0), window=rows, anchor="nw")
-        canvas.bind(
-            "<Configure>",
-            lambda event: canvas.itemconfigure(window_id, width=event.width),
-        )
-        rows.bind(
-            "<Configure>",
-            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        return canvas, rows
-
-    def _bind_list_wheel(self, canvas: tk.Canvas, rows: tk.Frame) -> None:
-        def scroll(event: tk.Event) -> str:
-            amount = -1 if event.delta > 0 else 1
-            canvas.yview_scroll(amount, "units")
-            return "break"
-
-        canvas.bind("<MouseWheel>", scroll)
-        rows.bind("<MouseWheel>", scroll)
-        for row in rows.winfo_children():
-            row.bind("<MouseWheel>", scroll)
-            for child in row.winfo_children():
-                child.bind("<MouseWheel>", scroll)
-
-    def _ingredient_rows(self, value: object) -> list[tuple[str, str]]:
-        if isinstance(value, (list, tuple)):
-            rows: list[tuple[str, str]] = []
-            for ingredient in value:
-                if isinstance(ingredient, (list, tuple)) and len(ingredient) >= 2:
-                    rows.append((str(ingredient[0]), str(ingredient[1])))
-                elif isinstance(ingredient, dict):
-                    rows.append(
-                        (
-                            str(ingredient.get("quantity", "")),
-                            str(ingredient.get("name", "")),
-                        )
-                    )
-                else:
-                    rows.append(("", str(ingredient)))
-            return rows
-        if isinstance(value, str):
-            rows = []
-            for line in value.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                separator = " | " if " | " in line else " - "
-                if separator in line:
-                    quantity, item_name = line.split(separator, 1)
-                    rows.append((quantity.strip(), item_name.strip()))
-                else:
-                    rows.append(("", line))
-            return rows
-        return []
-
-    def _direction_steps(self, value: object) -> list[str]:
-        if isinstance(value, str):
-            return [line.strip() for line in value.splitlines() if line.strip()]
-        if isinstance(value, (list, tuple)):
-            return [str(step).strip() for step in value if str(step).strip()]
-        return []
-
-    def _toggle_favorite(self) -> None:
-        if self.current_recipe is None:
-            return
-        self.current_recipe["favorite"] = not bool(
-            self.current_recipe.get("favorite", False)
-        )
-        self._show_recipe_detail(self.current_recipe)
-
-    def _delete_recipe(self) -> None:
-        recipe = self.current_recipe
-        if recipe is None:
-            return
-        if not messagebox.askyesno(
-            "Hapus resep",
-            f"Hapus resep “{recipe.get('name', 'Recipe')}”?",
+        path = filedialog.askopenfilename(
             parent=self.root,
-        ):
-            return
-        if recipe in self.recipes:
-            self.recipes.remove(recipe)
-            self.recipe_count = max(len(self.recipes), self.recipe_count - 1)
-        self._show_home_view()
-
-    # ------------------------------------------------------------------ cards
-    def _total_recipes(self) -> int:
-        return self.recipe_count
-
-    def _calc_columns(self, width: int) -> int:
-        card = self._px(177)
-        gap = self._px(10)
-        return max(1, (width + gap) // (card + gap))
-
-    def _cards_can_scroll(self) -> bool:
-        canvas = getattr(self, "card_canvas", None)
-        if canvas is None or not canvas.winfo_exists():
-            return False
-        bbox = canvas.bbox("all")
-        if not bbox:
-            return False
-        content_height = bbox[3] - bbox[1]
-        viewport_height = canvas.winfo_height()
-        return content_height > viewport_height > 1
-
-    def _sync_cards_scroll(self) -> None:
-        canvas = getattr(self, "card_canvas", None)
-        if canvas is None or not canvas.winfo_exists():
-            return
-        bbox = canvas.bbox("all")
-        if not bbox:
-            canvas.configure(scrollregion=(0, 0, 0, 0))
-            self.card_scrollbar.grid_remove()
-            return
-
-        viewport_w = canvas.winfo_width()
-        viewport_h = canvas.winfo_height()
-        content_h = bbox[3] - bbox[1]
-
-        if content_h > viewport_h > 1:
-            canvas.configure(scrollregion=(0, 0, viewport_w, content_h))
-            self.card_scrollbar.grid(row=2, column=1, sticky="ns", pady=(0, self._px(20)))
-        else:
-            canvas.configure(scrollregion=(0, 0, viewport_w, max(1, viewport_h)))
-            canvas.yview_moveto(0.0)
-            self.card_scrollbar.grid_remove()
-
-    def _on_cards_scroll(self, first: str, last: str) -> None:
-        if float(first) <= 0.0 and float(last) >= 1.0:
-            self.card_scrollbar.grid_remove()
-        else:
-            self.card_scrollbar.set(first, last)
-
-    def _on_cards_canvas_configure(self, event: tk.Event) -> None:
-        self.card_canvas.itemconfigure(self._cards_window, width=event.width)
-        cols = self._calc_columns(event.width)
-        if cols != self._cards_cols:
-            self._cards_cols = cols
-            self._filter_cards()
-        else:
-            self._sync_cards_scroll()
-
-    def _on_home_wheel(self, event: tk.Event) -> None:
-        if self.current_view != "home" or not self._cards_can_scroll():
-            return
-        canvas = getattr(self, "card_canvas", None)
-        if canvas is None or not canvas.winfo_exists():
-            return
-        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-    def _render_cards(self, query: str = "") -> None:
-        for child in self.card_area.winfo_children():
-            child.destroy()
-
-        needle = query.casefold()
-        visible = [
-            recipe
-            for recipe in self.recipes
-            if needle in str(recipe["name"]).casefold()
-            and (self.active_tab != "Favorit" or bool(recipe.get("favorite", False)))
-        ]
-
-        cols = max(1, self._cards_cols)
-        for index, recipe in enumerate(visible):
-            row, column = divmod(index, cols)
-            self._create_recipe_card(recipe, row=row, column=column)
-
-        if not visible:
-            tk.Label(
-                self.card_area,
-                text=(
-                    "Belum ada resep favorit"
-                    if self.active_tab == "Favorit"
-                    else "No recipes found"
-                ),
-                bg=self.WINDOW_BG,
-                fg=self.MUTED,
-                font=self._font(16),
-            ).grid(row=0, column=0, sticky="w")
-
-        self.card_canvas.yview_moveto(0.0)
-        self.root.after_idle(self._sync_cards_scroll)
-
-    def _create_recipe_card(
-        self,
-        recipe: dict[str, object],
-        row: int,
-        column: int,
-    ) -> None:
-        color = str(recipe["color"])
-        card = tk.Frame(
-            self.card_area,
-            bg=color,
-            width=self._px(177),
-            height=self._px(177),
-            highlightthickness=0,
+            title="Pilih foto makanan",
+            filetypes=[
+                ("Gambar", "*.jpg *.jpeg *.png *.gif *.bmp *.webp"),
+                ("Semua file", "*.*"),
+            ],
         )
-        card.grid(
-            row=row,
-            column=column,
-            sticky="nw",
-            padx=(0, self._px(10)),
-            pady=(0, self._px(10)),
-        )
-        card.pack_propagate(False)
+        if not path:
+            return
+        if self.muat_foto(path, 64, 64) is None:
+            messagebox.showerror("Foto", "File ini tidak bisa dibuka sebagai gambar.", parent=self.root)
+            return
+        self.foto_form = path
+        self.foto_form_baru = True
+        self.perbarui_pratinjau_foto()
 
-        image_area = tk.Frame(card, bg=color, height=self._px(139))
-        image_area.pack(fill="x", side="top")
-        image_area.pack_propagate(False)
+    def hapus_foto_form(self):
+        self.foto_form = None
+        self.foto_form_baru = False
+        self.perbarui_pratinjau_foto()
 
-        label_bar = tk.Frame(card, bg=self.ACCENT, height=self._px(38))
-        label_bar.pack(fill="x", side="bottom")
-        label_bar.pack_propagate(False)
-        tk.Label(
-            label_bar,
-            text=str(recipe["name"]),
-            bg=self.ACCENT,
-            fg="#FFFFFF",
-            font=self._font(24),
-            anchor="w",
-        ).pack(side="left", padx=(self._px(8), 0))
-        for widget in (card, image_area, label_bar, *label_bar.winfo_children()):
-            widget.configure(cursor="hand2")
-            widget.bind(
-                "<Button-1>",
-                lambda _event, selected=recipe: self._show_recipe_detail(selected),
-            )
-
-    # ----------------------------------------------------------------- search
-    def _clear_search_placeholder(self, _event: tk.Event) -> None:
-        if self.search_placeholder:
-            self.search_var.set("")
-            self.search_entry.configure(fg=self.TEXT)
-            self.search_placeholder = False
-
-    def _restore_search_placeholder(self, _event: tk.Event) -> None:
-        if not self.search_var.get().strip():
-            self.search_var.set(self.PLACEHOLDER_TEXT)
-            self.search_entry.configure(fg=self.PLACEHOLDER_FG)
-            self.search_placeholder = True
-            self._filter_cards()
-
-    def _filter_cards(self, _event: tk.Event | None = None) -> None:
-        query = "" if self.search_placeholder else self.search_var.get().strip()
-        self._render_cards(query)
-
-    # ------------------------------------------------------------------- tabs
-    def _select_tab(self, tab_name: str) -> None:
-        self.active_tab = tab_name
-        for name, label in self.tab_labels.items():
-            label.configure(fg=self.TEXT if name == tab_name else self.MUTED)
-        if tab_name == "Favorit":
-            favorite_count = sum(
-                bool(recipe.get("favorite", False)) for recipe in self.recipes
-            )
-            self.heading.configure(text=f"Favorit ({favorite_count})")
+    def perbarui_pratinjau_foto(self):
+        gambar = self.muat_foto(self.foto_form, 64, 64) if self.foto_form else None
+        if gambar:
+            self.label_pratinjau.config(image=gambar)
+            self.label_pratinjau.image = gambar
         else:
-            self.heading.configure(text=f"Semua Resep ({self._total_recipes()})")
-        self._filter_cards()
+            self.label_pratinjau.config(image="")
+        if self.foto_form:
+            self.label_info_foto.config(text=os.path.basename(self.foto_form))
+        else:
+            self.label_info_foto.config(text="Belum ada foto (opsional)")
 
-    # --------------------------------------------------------------- new recipe
-    def _open_new_recipe(self) -> None:
-        self._show_recipe_form()
+    def simpan_foto_form(self):
+        """Salin foto baru ke folder foto/ dan kembalikan nama filenya ("" = tanpa foto)."""
+        if not self.foto_form:
+            return ""
+        if not self.foto_form_baru:
+            return os.path.basename(self.foto_form)
+        os.makedirs(FOLDER_FOTO, exist_ok=True)
+        ekstensi = os.path.splitext(self.foto_form)[1].lower()
+        nama_baru = uuid.uuid4().hex[:12] + ekstensi
+        shutil.copyfile(self.foto_form, os.path.join(FOLDER_FOTO, nama_baru))
+        return nama_baru
 
-    # ---------------------------------------------------------- window control
-    def _minimize(self) -> None:
-        # Jendela dengan overrideredirect(True) tidak bisa di-iconify di banyak
-        # platform; matikan sementara lalu aktifkan lagi saat jendela dipulihkan.
-        self.root.overrideredirect(False)
-        self.root.iconify()
-        self.root.bind("", self._restore_frameless)
+    def fokus_bahan_pertama(self):
+        if self.baris_bahan:
+            self.baris_bahan[0]["entry_takaran"].focus_set()
 
-    def _restore_frameless(self, event: tk.Event) -> None:
-        if event.widget is self.root:
-            self.root.unbind("")
-            self.root.after(10, self._reapply_frameless)
+    def ambil_bahan(self):
+        hasil = []
+        for item in self.baris_bahan:
+            takaran = item["takaran"].get().strip()
+            bahan = item["bahan"].get().strip()
+            if takaran or bahan:
+                hasil.append((takaran, bahan))
+        return hasil
 
-    def _reapply_frameless(self) -> None:
-        self.root.overrideredirect(True)
-        self._enable_taskbar_icon()
+    def batal_form(self):
+        if self.resep_diedit is not None:
+            self.tampil_detail(self.resep_diedit)
+        else:
+            self.tampil_beranda()
 
-    def _toggle_maximize(self) -> None:
-        if self.is_maximized:
-            self.root.geometry(self.previous_geometry)
-            self.is_maximized = False
+    def simpan_resep(self):
+        nama = self.var_nama.get().strip()
+        if not nama:
+            self.entry_nama.config(highlightbackground=ORANYE, highlightcolor=ORANYE)
+            self.entry_nama.focus_set()
             return
 
-        self.previous_geometry = self.root.geometry()
-        width = self.root.winfo_screenwidth()
-        height = self.root.winfo_screenheight()
-        self.root.geometry(f"{width}x{height}+0+0")
-        self.is_maximized = True
-
-    def _start_window_move(self, event: tk.Event) -> None:
-        if self.is_maximized:
-            self._drag_offset_x = None
+        try:
+            nama_foto = self.simpan_foto_form()
+        except OSError:
+            messagebox.showerror("Foto", "Foto tidak bisa disimpan. Coba lagi.", parent=self.root)
             return
-        self._drag_offset_x = event.x_root - self.root.winfo_x()
-        self._drag_offset_y = event.y_root - self.root.winfo_y()
 
-    def _move_window(self, event: tk.Event) -> None:
-        if self._drag_offset_x is None or self._drag_offset_y is None:
+        data = {
+            "name": nama,
+            "photo": nama_foto,  # simpan nama file ini ke kolom foto (VARCHAR) di MySQL
+            "ingredients": self.ambil_bahan(),
+            "directions": self.daftar_langkah(self.teks_langkah.get("1.0", "end-1c")),
+        }
+        if self.resep_diedit is not None:
+            self.resep_diedit.update(data)
+            # TODO: update resep di database MySQL di sini
+            self.tampil_detail(self.resep_diedit)
             return
-        x = event.x_root - self._drag_offset_x
-        y = event.y_root - self._drag_offset_y
-        self.root.geometry(f"+{x}+{y}")
+
+        warna = WARNA_KARTU[len(self.resep) % len(WARNA_KARTU)]
+        self.resep.append({**data, "color": warna, "favorite": False})
+        # TODO: simpan resep baru ke database MySQL di sini
+        self.tab_aktif = "Resep"
+        self.tampil_beranda()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = RecipeKeeperApp(root)
+    AplikasiResep(root)
     root.mainloop()
